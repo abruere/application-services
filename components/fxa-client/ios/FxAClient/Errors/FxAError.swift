@@ -9,6 +9,7 @@ public enum FirefoxAccountError: LocalizedError {
     case network(message: String)
     case unspecified(message: String)
     case panic(message: String)
+    case emptyResult
 
     /// Our implementation of the localizedError protocol -- (This shows up in Sentry)
     public var errorDescription: String? {
@@ -21,6 +22,8 @@ public enum FirefoxAccountError: LocalizedError {
             return "FirefoxAccountError.unspecified: \(message)"
         case let .panic(message):
             return "FirefoxAccountError.panic: \(message)"
+        case .emptyResult:
+            return "FirefoxAccountError.emptyResult: FFI problem"
         }
     }
 
@@ -43,6 +46,18 @@ public enum FirefoxAccountError: LocalizedError {
         default:
             return .unspecified(message: String(freeingFxaString: message!))
         }
+    }
+
+    public static func unwrapResult<T>(_ callback: (UnsafeMutablePointer<FxAError>) -> T?) -> Result<T, FirefoxAccountError> {
+        var err = FxAError(code: FxA_NoError, message: nil)
+        let returnedVal = callback(&err)
+        if let fxaErr = FirefoxAccountError.fromConsuming(err) {
+            return .failure(fxaErr)
+        }
+        guard let result = returnedVal else {
+            return .failure(.emptyResult)
+        }
+        return .success(result)
     }
 
     @discardableResult
