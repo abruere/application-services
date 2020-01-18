@@ -161,12 +161,14 @@ impl<'a> BookmarksStore<'a> {
                                               remoteGuid, newLevel, newKind,
                                               localDateAdded, remoteDateAdded,
                                               lastModified, oldTitle, newTitle,
-                                              oldPlaceId, newPlaceId)
+                                              oldPlaceId, newPlaceId,
+                                              newKeyword)
                      SELECT n.mergedGuid, b.id, v.id,
                             v.guid, n.level, n.remoteType,
                             b.dateAdded, v.dateAdded,
                             MAX(v.dateAdded, {now}), b.title, v.title,
-                            b.fk, v.placeId
+                            b.fk, v.placeId,
+                            v.keyword
                      FROM ops n
                      JOIN moz_bookmarks_synced v ON v.guid = n.remoteGuid
                      LEFT JOIN moz_bookmarks b ON b.guid = n.localGuid",
@@ -443,6 +445,21 @@ impl<'a> BookmarksStore<'a> {
     }
 
     fn apply_remote_items(&self, now: Timestamp) -> Result<()> {
+        // Remove all keywords from old and new URLs, and remove new keywords
+        // from all existing URLs. The `NOT NULL` conditions are important; they
+        // ensure that SQLite uses our partial indexes, instead of a table scan.
+        log::debug!("Removing old keywords");
+        self.interruptee.err_if_interrupted()?;
+        self.db.execute_batch(
+            "DELETE FROM moz_keywords
+             WHERE place_id IN (SELECT oldPlaceId FROM itemsToApply
+                                WHERE oldPlaceId NOT NULL) OR
+                   place_id IN (SELECT newPlaceId FROM itemsToApply
+                                WHERE newPlaceId NOT NULL) OR
+                   keyword IN (SELECT newKeyword FROM itemsToApply
+                               WHERE newKeyword NOT NULL)",
+        )?;
+
         log::debug!("Removing old tags");
         self.interruptee.err_if_interrupted()?;
         self.db.execute_batch(
@@ -507,6 +524,15 @@ impl<'a> BookmarksStore<'a> {
             bookmark_kind = SyncedBookmarkKind::Bookmark as u8,
         ))?;
 
+        log::debug!("Inserting new keywords for new URLs");
+        self.interruptee.err_if_interrupted()?;
+        self.db.execute_batch(
+            "INSERT INTO moz_keywords(keyword, place_id)
+             SELECT newKeyword, newPlaceId
+             FROM itemsToApply
+             WHERE newKeyword NOT NULL",
+        )?;
+
         log::debug!("Inserting new tags for new URLs");
         self.interruptee.err_if_interrupted()?;
         self.db.execute_batch(
@@ -550,50 +576,27 @@ impl<'a> BookmarksStore<'a> {
              {}
              JOIN itemsToApply n ON n.mergedGuid = b.guid
              WHERE n.localDateAdded < n.remoteDateAdded",
-            UploadItemsFragment {
-                alias: "b",
-                remote_guid_column_name: "n.remoteGuid",
-            },
+            UploadItemsFragment("b")
         ))?;
 
         log::debug!("Staging remaining locally changed items for upload");
-        sql_support::each_sized_chunk(
+        sql_support::each_chunk_mapped(
             upload_items,
-            sql_support::default_max_variable_number() / 2,
+            |op| op.merged_node.guid.as_str(),
             |chunk, _| -> Result<()> {
                 let sql = format!(
-                    "WITH ops(mergedGuid, remoteGuid) AS (VALUES {vars})
-                     INSERT OR IGNORE INTO itemsToUpload(id, guid, syncChangeCounter,
+                    "INSERT OR IGNORE INTO itemsToUpload(id, guid, syncChangeCounter,
                                                       parentGuid, parentTitle,
                                                       dateAdded, kind, title,
                                                       placeId, url, keyword,
                                                       position)
                      {upload_items_fragment}
-                     JOIN ops n ON n.mergedGuid = b.guid",
-                    vars =
-                        sql_support::repeat_display(chunk.len(), ",", |_, f| write!(f, "(?, ?)")),
-                    upload_items_fragment = UploadItemsFragment {
-                        alias: "b",
-                        remote_guid_column_name: "n.remoteGuid",
-                    },
+                     WHERE b.guid IN ({vars})",
+                    vars = sql_support::repeat_sql_vars(chunk.len()),
+                    upload_items_fragment = UploadItemsFragment("b")
                 );
 
-                let mut params = Vec::with_capacity(chunk.len() * 2);
-                for op in chunk.iter() {
-                    self.interruptee.err_if_interrupted()?;
-
-                    let merged_guid = op.merged_node.guid.as_str();
-                    params.push(Some(merged_guid));
-
-                    let remote_guid = op
-                        .merged_node
-                        .merge_state
-                        .remote_node()
-                        .map(|node| node.guid.as_str());
-                    params.push(remote_guid);
-                }
-
-                self.db.execute(&sql, &params)?;
+                self.db.execute(&sql, chunk)?;
                 Ok(())
             },
         )?;
@@ -1108,6 +1111,7 @@ impl<'a> Merger<'a> {
         }
         // Merge and stage outgoing items via dogear.
         let driver = Driver::default();
+        self.prepare()?;
         let result = self.merge_with_driver(&driver, &MergeInterruptee(self.store.interruptee));
         log::debug!("merge completed");
 
@@ -1116,6 +1120,48 @@ impl<'a> Merger<'a> {
             telem.validation(driver.validation.into_inner());
         }
         result
+    }
+
+    /// Prepares synced bookmarks for merging.
+    fn prepare(&self) -> Result<()> {
+        // Sync and Fennec associate keywords with bookmarks, and don't sync
+        // POST data; Rust Places associates them with URLs, and also doesn't
+        // support POST data; Desktop associates keywords with (URL, POST data)
+        // pairs, and multiple bookmarks may have the same URL.
+        //
+        // When a keyword changes, clients should reupload all bookmarks with
+        // the affected URL (bug 1328737). Just in case, we flag any synced
+        // bookmarks that have different keywords for the same URL, or the same
+        // keyword for different URLs, for reupload.
+        self.store.interruptee.err_if_interrupted()?;
+        self.store.db.execute_batch(&format!(
+            "UPDATE moz_bookmarks_synced SET
+               validity = {reupload}
+             WHERE validity = {valid} AND (
+               placeId IN (
+                 /* Same URL, different keywords. `COUNT` ignores NULLs, so
+                    we need to count them separately. This handles cases where
+                    a keyword was removed from one, but not all bookmarks with
+                    the same URL. */
+                 SELECT placeId FROM moz_bookmarks_synced
+                 GROUP BY placeId
+                 HAVING COUNT(DISTINCT keyword) +
+                        COUNT(DISTINCT CASE WHEN keyword IS NULL
+                                       THEN 1 END) > 1
+               ) OR keyword IN (
+                 /* Different URLs, same keyword. Bookmarks with keywords but
+                    without URLs are already invalid, so we don't need to handle
+                    NULLs here. */
+                 SELECT keyword FROM moz_bookmarks_synced
+                 WHERE keyword NOT NULL
+                 GROUP BY keyword
+                 HAVING COUNT(DISTINCT placeId) > 1
+               )
+             )",
+            reupload = SyncedBookmarkValidity::Reupload as u8,
+            valid = SyncedBookmarkValidity::Valid as u8,
+        ))?;
+        Ok(())
     }
 
     /// Creates a local tree item from a row in the `localItems` CTE.
@@ -1450,12 +1496,7 @@ impl fmt::Display for ItemTypeFragment {
 
 /// Formats a `SELECT` statement for staging local items in the `itemsToUpload`
 /// table.
-struct UploadItemsFragment {
-    /// The alias to use for the Places `moz_bookmarks` table.
-    alias: &'static str,
-    /// The name of the column containing the synced item's GUID.
-    remote_guid_column_name: &'static str,
-}
+struct UploadItemsFragment(&'static str);
 
 impl fmt::Display for UploadItemsFragment {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -1465,16 +1506,14 @@ impl fmt::Display for UploadItemsFragment {
                     p.guid AS parentGuid, p.title AS parentTitle,
                     {alias}.dateAdded, {kind_fragment} AS kind,
                     {alias}.title, h.id AS placeId, h.url,
-                    (SELECT v.keyword FROM moz_bookmarks_synced v
-                     WHERE v.guid = {remote_guid_column_name}),
+                    (SELECT k.keyword FROM moz_keywords k
+                     WHERE k.place_id = h.id) AS keyword,
                     {alias}.position
                 FROM moz_bookmarks {alias}
                 JOIN moz_bookmarks p ON p.id = {alias}.parent
                 LEFT JOIN moz_places h ON h.id = {alias}.fk",
-            alias = self.alias,
-            kind_fragment =
-                item_kind_fragment(self.alias, "type", UrlOrPlaceIdFragment::Url("h.url")),
-            remote_guid_column_name = self.remote_guid_column_name,
+            alias = self.0,
+            kind_fragment = item_kind_fragment(self.0, "type", UrlOrPlaceIdFragment::Url("h.url")),
         )
     }
 }

@@ -218,3 +218,17 @@ CREATE TABLE IF NOT EXISTS moz_bookmarks_synced_tag_relation(
                            ON DELETE CASCADE,
     PRIMARY KEY(itemId, tagId)
 ) WITHOUT ROWID;
+
+-- This table holds search keywords for URLs. Desktop would like to replace
+-- these with custom search engines eventually (bug 648398); however, we
+-- must still round-trip keywords imported via Sync or migrated from Fennec.
+-- Since none of the `moz_bookmarks_synced_*` tables are durable, we store
+-- keywords for URLs in a separate table. Unlike Desktop, we don't support
+-- custom POST data, since we don't sync it (bug 1345417), and Fennec
+-- doesn't write it.
+CREATE TABLE IF NOT EXISTS moz_keywords(
+    id INTEGER PRIMARY KEY,
+    keyword TEXT NOT NULL UNIQUE,
+    place_id INTEGER NOT NULL UNIQUE REFERENCES moz_places(id)
+                                     ON DELETE CASCADE
+);
