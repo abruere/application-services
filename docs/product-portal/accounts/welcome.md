@@ -33,7 +33,7 @@ In return, your service will be allocated a set of OAuth client credentials:
 
 For **development purposes** you can use the [Firefox Accounts OAuth Credential Management dashboard](/en-US/Firefox_Accounts_OAuth_Dashboard) to provision relier credentials.  Our development environments support "127.0.0.1" and "localhost" as valid "redirectUri" values to ease local development.
 
-Registration of new **production reliers** is currently a manual process.  Send an email to [dev-fxacct@mozilla.org](https://mail.mozilla.org/listinfo/dev-fxacct) to inform us of your desire to be a relying service, and include the desired **name** and **redirect_uri**.  We will work with you to provision client credentials, possibly with multiple versions for different environments (e.g., production, development, etc.):
+Registration of new **production reliers** is currently a manual process.  Send an email to [dev-fxacct@mozilla.org](https://mail.mozilla.org/listinfo/dev-fxacct) to inform us of your desire to be a relying service, and include the desired **name** and **redirect_uri**.  We will work with you to provision client credentials, possibly with multiple versions for different environments (e.g., production, development, etc.).
 
 Note that the **client_secret** is _your responsibility_ to keep safe. If you lose it, we have no way to recover it, and it will be necessary to issue you a new secret. 
 
@@ -62,7 +62,7 @@ The recommended steps for initiating login with the HTTP API directly are:
     *   **redirect_uri** \- the **redirect_uri** you gave the FxA team during the provisioning of your service
     *   **scope** \- the requested scope of FxA user data or API access. Currently, only **profile** and related sub-scopes (e.g., **profile:email**) are supported.
     *   **state -** an alphanumeric value created by the relying service and associated with client's session. It's up to the relying service how this can be used, but it's primary and recommended purpose is to prevent forgery attacks.
-3.  **Navigate the user's client to the FxA OAuth authorization endpoint.**  This URL should come from the "authorization_endpoint" key in the discovery document, and the request must include URL query parameters for the service's **client_id **and a **state** value. Refer to the [FxA OAuth documentation](https://github.com/mozilla/fxa-oauth-server/blob/master/docs/api.md#get-v1authorization) for further information about this step and optional parameters.
+3.  **Navigate the user's client to the FxA OAuth authorization endpoint.**  This URL should come from the "authorization_endpoint" key in the discovery document, and the request must include URL query parameters for the service's **client_id** and a **state** value. Refer to the [FxA OAuth documentation](https://github.com/mozilla/fxa-oauth-server/blob/master/docs/api.md#get-v1authorization) for further information about this step and optional parameters.
 
 #### Authenticating the user
 
@@ -102,13 +102,13 @@ The access token can now be used to fetch the user's profile data.  Make a GET 
 *   uid:  the user's opaque, stable account identifier
 *   email:  the user's verified email address
 *   displayName:  the user's preferred human-readable display name
-*   avater: the URL of the user's profile picture
+*   avatar: the URL of the user's profile picture
 
 Some fields may be missing if the appropriate scopes were not requested, or the user declined to share the information.
 
 #### Security considerations
 
-The FxA OAuth token should **_only _**be used as an authentication token to access FxA APIs. It should not:
+The FxA OAuth token should **_only_** be used as an authentication token to access FxA APIs. It should not:
 
 *   be sent to untrusted parties
 *   be used as a sessioning mechanism to track logged in users.
@@ -123,6 +123,7 @@ For chrome code in Firefox Desktop, we provide [FxAccountsOAuthClient.jsm](/en-
 
 You can use the existing [identity.launchWebAuthFlow](/en-US/docs/Mozilla/Add-ons/WebExtensions/API/identity/launchWebAuthFlow) APIs to integrate your WebExtensions with Firefox Accounts. The system also supports [PKCE](/en-US/docs/) OAuth public clients to create extensions without server components. The [fxa-crypto-relier library](/en-US/docs/) provides an abstraction for Firefox Accounts login in WebExtensions:
 
+```js
 const fxaKeysUtil = new fxaCryptoRelier.OAuthUtils();
 
 fxaKeysUtil.launchWebExtensionKeyFlow('YOUR\_CLIENT\_ID', {
@@ -135,6 +136,7 @@ fxaKeysUtil.launchWebExtensionKeyFlow('YOUR\_CLIENT\_ID', {
     refresh\_token: loginDetails.refresh\_token,
     key
 };
+```
 
 ![](https://www.lucidchart.com/publicSegments/view/c83f8946-5bee-4fdd-bc77-22960c680356/image.jpeg)
 
@@ -172,7 +174,7 @@ Firefox Accounts only stores core identity data and associated profile informati
 *   optional display name
 *   optional profile image
 
-### ​Using a OAuth token
+### Using a OAuth token
 
 After a relying service has obtained an FxA OAuth access token for a FxA user, it can access Mozilla service APIs that use FxA OAuth. This is largely a work in progress, and we expect the number of APIs that use FxA OAuth will grow and evolve over time.
 
